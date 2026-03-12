@@ -361,6 +361,10 @@ async function fetchRegistry(qiniu) {
   }
 }
 
+function qiniuBase64(buf) {
+  return buf.toString("base64").replace(/\//g, "_").replace(/\+/g, "-");
+}
+
 function buildDownloadUrl(qiniu, key) {
   const baseUrl = `${qiniu.downloadDomain}/${key}`;
   if (!qiniu.isPrivate) return baseUrl;
@@ -368,9 +372,9 @@ function buildDownloadUrl(qiniu, key) {
   const deadline = Math.floor(Date.now() / 1000) + 3600;
   const urlWithExpiry = `${baseUrl}?e=${deadline}`;
   const sign = crypto.createHmac("sha1", qiniu.secretKey)
-    .update(urlWithExpiry + "\n")
+    .update(urlWithExpiry)
     .digest();
-  const token = `${qiniu.accessKey}:${sign.toString("base64url")}`;
+  const token = `${qiniu.accessKey}:${qiniuBase64(sign)}`;
   return `${urlWithExpiry}&token=${token}`;
 }
 
@@ -383,7 +387,7 @@ function buildUploadToken(qiniu, key) {
   const sign = crypto.createHmac("sha1", qiniu.secretKey)
     .update(encodedPutPolicy)
     .digest();
-  const encodedSign = sign.toString("base64url");
+  const encodedSign = qiniuBase64(sign);
   return `${qiniu.accessKey}:${encodedSign}:${encodedPutPolicy}`;
 }
 
