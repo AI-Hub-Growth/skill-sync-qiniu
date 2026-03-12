@@ -9,6 +9,8 @@ import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 
+await loadDotEnv(path.join(import.meta.dirname, ".env"));
+
 const TEXT_EXTENSIONS = new Set([
   "md", "mdx", "txt", "json", "json5", "yaml", "yml", "toml",
   "js", "cjs", "mjs", "ts", "tsx", "jsx", "py", "sh", "rb",
@@ -496,6 +498,26 @@ function titleCase(value) {
 
 async function safeStat(filePath) {
   try { return await fs.stat(filePath); } catch { return null; }
+}
+
+async function loadDotEnv(filePath) {
+  let content;
+  try {
+    content = await fs.readFile(filePath, "utf8");
+  } catch {
+    return;
+  }
+  for (const line of content.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const eq = trimmed.indexOf("=");
+    if (eq === -1) continue;
+    const key = trimmed.slice(0, eq).trim();
+    const val = trimmed.slice(eq + 1).trim();
+    if (key && !(key in process.env)) {
+      process.env[key] = val;
+    }
+  }
 }
 
 main().catch((err) => {
