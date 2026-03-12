@@ -1,0 +1,4 @@
+*.ndjson
+.env
+.env.*
+node_modules/
