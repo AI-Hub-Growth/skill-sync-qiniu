@@ -1,4 +1,11 @@
 #!/usr/bin/env bash
+# Usage:
+#   ./sync.sh --root /path/to/skills --dry-run
+#   ./sync.sh --root /path/to/skills --changelog "Initial release"
+#   ./sync.sh --root /path/to/skills --bump minor --changelog "New features"
+#   ./sync.sh --root ./skills --root /other/skills --output /tmp/manifest.ndjson
+#
+# Requires .env in the same directory (copy from .env.template and fill in values).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
