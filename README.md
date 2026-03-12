@@ -44,7 +44,6 @@ chmod +x sync.sh
 | `QINIU_SECRET_KEY` | Secret Key | ✓ |
 | `QINIU_BUCKET` | Bucket 名称 | ✓ |
 | `QINIU_DOWNLOAD_DOMAIN` | 下载域名 | ✓ |
-| `QINIU_AUTHOR` | manifest 中的 author 字段 | ✓ |
 | `QINIU_UPLOAD_URL` | 上传端点（默认 `https://up.qiniup.com`） | |
 | `QINIU_PRIVATE` | 私有 bucket（默认 `true`） | |
 | `QINIU_AI_API_KEY` | 七牛 AI API Key，用于中文翻译 | |

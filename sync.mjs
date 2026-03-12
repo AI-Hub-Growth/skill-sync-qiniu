@@ -28,7 +28,6 @@ async function main() {
   const uploadUrl = process.env.QINIU_UPLOAD_URL || "https://up.qiniup.com";
   const downloadDomain = requireEnv("QINIU_DOWNLOAD_DOMAIN").replace(/\/+$/, "");
   const isPrivate = (process.env.QINIU_PRIVATE || "true") === "true";
-  const author = requireEnv("QINIU_AUTHOR");
   const aiApiKey = process.env.QINIU_AI_API_KEY || "";
 
   const qiniu = { accessKey, secretKey, bucket, uploadUrl, downloadDomain, isPrivate };
@@ -134,7 +133,6 @@ async function main() {
     return JSON.stringify({
       slug: c.slug,
       name,
-      author,
       description,
       stars: "0",
       downloads: "0",
