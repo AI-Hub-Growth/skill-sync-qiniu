@@ -128,8 +128,8 @@ async function main() {
     const entry = registry.skills?.[c.slug];
     const version = entry?.version || c.latestVersion || "1.0.0";
     const downloadUrl = `${downloadDomain}/${c.slug}/${c.slug}-${version}.zip`;
-    const name = entry?.name || c.meta?.name || titleCase(c.slug);
-    const description = entry?.description || c.meta?.description || "";
+    const name = entry?.name_zh || entry?.name || c.meta?.name || titleCase(c.slug);
+    const description = entry?.description_zh || entry?.description || c.meta?.description || "";
     return JSON.stringify({
       slug: c.slug,
       name,
@@ -383,7 +383,7 @@ function buildUploadToken(qiniu, key) {
     scope: `${qiniu.bucket}:${key}`,
     deadline: Math.floor(Date.now() / 1000) + 3600,
   });
-  const encodedPutPolicy = Buffer.from(putPolicy).toString("base64url");
+  const encodedPutPolicy = qiniuBase64(Buffer.from(putPolicy));
   const sign = crypto.createHmac("sha1", qiniu.secretKey)
     .update(encodedPutPolicy)
     .digest();
