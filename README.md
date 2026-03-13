@@ -46,6 +46,7 @@ chmod +x sync.sh
 | `QINIU_DOWNLOAD_DOMAIN` | 下载域名 | ✓ |
 | `QINIU_UPLOAD_URL` | 上传端点（默认 `https://up.qiniup.com`） | |
 | `QINIU_PRIVATE` | 私有 bucket（默认 `true`） | |
+| `QINIU_AUTHOR` | author 字段 fallback（git remote 解析失败时使用） | |
 | `QINIU_AI_API_KEY` | 七牛 AI API Key，用于中文翻译 | |
 
 区域上传端点：`z0=up-z0.qiniup.com`，`z1=up-z1.qiniup.com`，`z2=up-z2.qiniup.com`

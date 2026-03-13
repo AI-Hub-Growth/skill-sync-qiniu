@@ -29,6 +29,7 @@ async function main() {
   const downloadDomain = requireEnv("QINIU_DOWNLOAD_DOMAIN").replace(/\/+$/, "");
   const isPrivate = (process.env.QINIU_PRIVATE || "true") === "true";
   const aiApiKey = process.env.QINIU_AI_API_KEY || "";
+  const authorFallback = process.env.QINIU_AUTHOR || "";
 
   const qiniu = { accessKey, secretKey, bucket, uploadUrl, downloadDomain, isPrivate };
 
@@ -47,7 +48,8 @@ async function main() {
     const files = await listTextFiles(skill.folder);
     const fingerprint = buildFingerprint(files);
     const meta = await parseSkillMeta(skill.folder);
-    return { ...skill, fileCount: files.length, fingerprint, meta };
+    const { author, repoUrl } = await resolveGitInfo(skill.folder, authorFallback);
+    return { ...skill, fileCount: files.length, fingerprint, meta, author, repoUrl };
   });
 
   const registry = await fetchRegistry(qiniu);
@@ -133,13 +135,14 @@ async function main() {
     return JSON.stringify({
       slug: c.slug,
       name,
+      author: c.author || "",
       description,
       stars: "0",
       downloads: "0",
-      versions: "1",
+      versions: version,
       installs_current: 0,
       installs_all_time: 0,
-      source_url: "",
+      source_url: c.repoUrl || "",
       detail: entry?.changelog || options.changelog || "Initial release",
       download_url: downloadUrl,
     });
@@ -348,8 +351,29 @@ async function parseSkillMeta(folder) {
   return meta;
 }
 
-async function fetchRegistry(qiniu) {
+async function resolveGitInfo(skillFolder, fallback) {
   try {
+    const { stdout } = await execFileAsync("git", ["remote", "get-url", "origin"], {
+      cwd: skillFolder,
+    });
+    const url = stdout.trim();
+
+    const httpsMatch = /https?:\/\/([^/]+)\/([^/]+)\/([^/]+?)(?:\.git)?$/.exec(url);
+    if (httpsMatch) {
+      const [, host, user, repo] = httpsMatch;
+      return { author: user, repoUrl: `https://${host}/${user}/${repo}` };
+    }
+
+    const sshMatch = /git@([^:]+):([^/]+)\/([^/]+?)(?:\.git)?$/.exec(url);
+    if (sshMatch) {
+      const [, host, user, repo] = sshMatch;
+      return { author: user, repoUrl: `https://${host}/${user}/${repo}` };
+    }
+  } catch {}
+  return { author: fallback, repoUrl: "" };
+}
+
+async function fetchRegistry(qiniu) {  try {
     const url = buildDownloadUrl(qiniu, "registry.json");
     const res = await fetch(url, { signal: AbortSignal.timeout(30000) });
     if (res.status === 404) return { skills: {} };
