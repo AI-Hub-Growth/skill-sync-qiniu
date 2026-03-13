@@ -30,19 +30,12 @@ async function main() {
   const isPrivate = (process.env.QINIU_PRIVATE || "true") === "true";
   const aiApiKey = process.env.QINIU_AI_API_KEY || "";
   const authorFallback = process.env.QINIU_AUTHOR || "";
+  const githubToken = process.env.GITHUB_TOKEN || "";
 
   const qiniu = { accessKey, secretKey, bucket, uploadUrl, downloadDomain, isPrivate };
 
   const roots = options.roots.length > 0 ? options.roots : [path.resolve("skills")];
   const skills = await findSkills(roots);
-
-  if (skills.length === 0) {
-    throw new Error("No skills found.");
-  }
-
-  console.log("Qiniu skill sync");
-  console.log(`Roots: ${roots.join(", ")}`);
-  console.log(`Skills found: ${skills.length}`);
 
   const locals = await mapWithConcurrency(skills, options.concurrency, async (skill) => {
     const files = await listTextFiles(skill.folder);
@@ -54,16 +47,37 @@ async function main() {
 
   const registry = await fetchRegistry(qiniu);
 
-  const candidates = locals.map((skill) => {
+  const localCandidates = locals.map((skill) => {
     const entry = registry.skills?.[skill.slug];
-    if (!entry) {
-      return { ...skill, status: "new", latestVersion: null };
-    }
-    if (entry.fingerprint === skill.fingerprint) {
-      return { ...skill, status: "synced", latestVersion: entry.version };
-    }
+    if (!entry) return { ...skill, status: "new", latestVersion: null };
+    if (entry.fingerprint === skill.fingerprint) return { ...skill, status: "synced", latestVersion: entry.version };
     return { ...skill, status: "update", latestVersion: entry.version };
   });
+
+  const sourcesFile = options.sourcesFile ?? path.resolve("sources.json");
+  const sources = await loadSources(sourcesFile);
+  const remoteSkillArrays = sources.length > 0
+    ? await mapWithConcurrency(sources, options.concurrency, (src) =>
+        resolveRemoteSource(src, registry, githubToken, authorFallback).catch((err) => {
+          console.warn(`  WARN: skip remote source ${src.url}: ${err.message}`);
+          return [];
+        }))
+    : [];
+  const remoteCandidates = remoteSkillArrays.flat().filter(Boolean);
+
+  const candidateMap = new Map();
+  for (const c of localCandidates) candidateMap.set(c.slug, c);
+  for (const c of remoteCandidates) candidateMap.set(c.slug, c);
+  const candidates = [...candidateMap.values()].sort((a, b) => a.slug.localeCompare(b.slug));
+
+  if (candidates.length === 0) {
+    throw new Error("No skills found.");
+  }
+
+  console.log("Qiniu skill sync");
+  console.log(`Roots: ${roots.join(", ")}`);
+  if (sources.length > 0) console.log(`Remote sources: ${sources.length}`);
+  console.log(`Skills found: ${candidates.length}`);
 
   const actionable = candidates.filter((c) => c.status !== "synced");
 
@@ -81,6 +95,7 @@ async function main() {
   if (options.dryRun) {
     console.log("");
     console.log(`Dry run: would upload ${actionable.length} skill(s).`);
+    for (const c of actionable) await c._cleanup?.();
     return;
   }
 
@@ -104,17 +119,20 @@ async function main() {
     const key = `${candidate.slug}/${candidate.slug}-${version}.zip`;
     await uploadFile(qiniu, key, zipPath);
     await fs.rm(zipPath, { force: true });
+    await candidate._cleanup?.();
 
     if (!registry.skills) registry.skills = {};
     registry.skills[candidate.slug] = {
       version,
       fingerprint: candidate.fingerprint,
+      ...(candidate.remoteFingerprint && { remote_fingerprint: candidate.remoteFingerprint }),
       changelog: options.changelog,
       updatedAt: new Date().toISOString(),
       name: candidate.meta.name || titleCase(candidate.slug),
       description: candidate.meta.description || "",
       name_zh: nameZh,
       description_zh: descZh,
+      ...(candidate.repoUrl && { source_url: candidate.repoUrl }),
     };
 
     console.log(`OK ${candidate.slug}@${version}`);
@@ -166,6 +184,7 @@ function parseArgs(argv) {
     changelog: "",
     output: path.resolve("skills-manifest.ndjson"),
     concurrency: 4,
+    sourcesFile: null,
   };
 
   for (let i = 0; i < argv.length; i++) {
@@ -202,6 +221,12 @@ function parseArgs(argv) {
       options.concurrency = val;
       continue;
     }
+    if (arg === "--sources") {
+      const val = argv[++i];
+      if (!val) throw new Error("--sources requires a file path");
+      options.sourcesFile = path.resolve(val);
+      continue;
+    }
     throw new Error(`Unknown argument: ${arg}`);
   }
 
@@ -218,6 +243,7 @@ Options:
   --changelog <text>        Changelog text
   --output <file>           Manifest output path (default: ./skills-manifest.ndjson)
   --concurrency <n>         Concurrency 1-32 (default: 4)
+  --sources <file>          Remote sources JSON (default: ./sources.json if exists)
   -h, --help                Show help
 
 Required env vars:
@@ -230,7 +256,8 @@ Required env vars:
 Optional env vars:
   QINIU_UPLOAD_URL          Upload endpoint (default: https://up.qiniup.com)
   QINIU_PRIVATE             Private bucket true/false (default: true)
-  QINIU_AI_API_KEY          Qiniu AI API key for Chinese translation`);
+  QINIU_AI_API_KEY          Qiniu AI API key for Chinese translation
+  GITHUB_TOKEN              GitHub token for higher API rate limits`);
 }
 
 async function findSkills(roots) {
@@ -543,6 +570,156 @@ async function loadDotEnv(filePath) {
     if (key && !(key in process.env)) {
       process.env[key] = val;
     }
+  }
+}
+
+// ── Remote source helpers ───────────────────────────────────────────────────
+
+function parseGitHubUrl(urlStr) {
+  const cleaned = urlStr.trim().replace(/\/+$/, "");
+  const match = /^https:\/\/github\.com\/([^/]+)\/([^/]+)\/tree\/([^/]+)\/(.+)$/.exec(cleaned);
+  if (!match) {
+    throw new Error(`Invalid GitHub URL (expected https://github.com/{owner}/{repo}/tree/{branch}/{path}): ${urlStr}`);
+  }
+  const [, owner, repo, ref, skillPath] = match;
+  return { owner, repo, ref, skillPath };
+}
+
+async function fetchGitHubTree(owner, repo, ref, token) {
+  const url = `https://api.github.com/repos/${owner}/${repo}/git/trees/${ref}?recursive=1`;
+  const headers = { Accept: "application/vnd.github.v3+json", "User-Agent": "skill-sync-qiniu" };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const res = await fetch(url, { headers, signal: AbortSignal.timeout(30000) });
+  if (!res.ok) throw new Error(`GitHub Tree API error HTTP ${res.status} for ${owner}/${repo}@${ref}`);
+  const data = await res.json();
+  if (data.truncated) console.warn(`  WARN: GitHub tree truncated for ${owner}/${repo}`);
+  return data.tree || [];
+}
+
+async function downloadGitHubSkill(parsed, token, tree) {
+  const { owner, repo, ref, skillPath } = parsed;
+  const prefix = skillPath + "/";
+  const blobs = tree.filter((item) => item.type === "blob" && item.path.startsWith(prefix));
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "skill-sync-"));
+
+  await mapWithConcurrency(blobs, 4, async (blob) => {
+    const relPath = blob.path.slice(prefix.length);
+    const localPath = path.join(tmpDir, relPath);
+    await fs.mkdir(path.dirname(localPath), { recursive: true });
+    const rawUrl = `https://raw.githubusercontent.com/${owner}/${repo}/${ref}/${blob.path}`;
+    const headers = { "User-Agent": "skill-sync-qiniu" };
+    if (token) headers.Authorization = `Bearer ${token}`;
+    const res = await fetch(rawUrl, { headers, signal: AbortSignal.timeout(30000) });
+    if (!res.ok) throw new Error(`Failed to fetch ${blob.path}: HTTP ${res.status}`);
+    await fs.writeFile(localPath, Buffer.from(await res.arrayBuffer()));
+  });
+
+  return tmpDir;
+}
+
+async function loadSources(filePath) {
+  try {
+    const content = await fs.readFile(filePath, "utf8");
+    return JSON.parse(content);
+  } catch (err) {
+    if (err.code === "ENOENT") return [];
+    throw new Error(`Failed to load sources from ${filePath}: ${err.message}`);
+  }
+}
+
+async function resolveRemoteSource(source, registry, token, fallback) {
+  const parsed = parseGitHubUrl(source.url);
+  const repoUrl = `https://github.com/${parsed.owner}/${parsed.repo}`;
+  const tree = await fetchGitHubTree(parsed.owner, parsed.repo, parsed.ref, token);
+  const pathPrefix = parsed.skillPath + "/";
+
+  const pfx = source.prefix !== undefined ? source.prefix : sanitizeSlug(parsed.owner);
+  const makeSlug = (name) =>
+    sanitizeSlug(pfx ? `${pfx}-${name}` : name);
+
+  const hasRootMarker = tree.some(
+    (item) => item.type === "blob" &&
+      (item.path === `${parsed.skillPath}/SKILL.md` || item.path === `${parsed.skillPath}/skill.md`)
+  );
+
+  if (hasRootMarker) {
+    const baseName = parsed.skillPath.split("/").pop();
+    const slug = source.slug ? sanitizeSlug(source.slug) : makeSlug(baseName);
+    return [await resolveOneRemoteSkill({ ...parsed, slug }, tree, repoUrl, registry, token, fallback)];
+  }
+
+  // Collection mode: enumerate direct subdirs that have SKILL.md
+  const subdirs = new Set();
+  for (const item of tree) {
+    if (item.type !== "blob" || !item.path.startsWith(pathPrefix)) continue;
+    const rel = item.path.slice(pathPrefix.length);
+    if (!rel.includes("/")) continue;
+    subdirs.add(rel.split("/")[0]);
+  }
+
+  const skills = [];
+  for (const subdir of [...subdirs].sort()) {
+    const subdirPath = `${parsed.skillPath}/${subdir}`;
+    const hasMarker = tree.some(
+      (item) => item.type === "blob" &&
+        (item.path === `${subdirPath}/SKILL.md` || item.path === `${subdirPath}/skill.md`)
+    );
+    if (!hasMarker) continue;
+    skills.push(
+      await resolveOneRemoteSkill(
+        { ...parsed, skillPath: subdirPath, slug: makeSlug(subdir) },
+        tree, repoUrl, registry, token, fallback
+      )
+    );
+  }
+  return skills;
+}
+
+async function resolveOneRemoteSkill(parsed, tree, repoUrl, registry, token, fallback) {
+  const { slug, skillPath, owner } = parsed;
+  const prefix = skillPath + "/";
+
+  const entries = tree
+    .filter((item) => item.type === "blob" && item.path.startsWith(prefix))
+    .map((item) => `${item.path.slice(prefix.length)}:${item.sha}`)
+    .sort();
+  const remoteFingerprint = crypto.createHash("sha256").update(entries.join("\n")).digest("hex");
+
+  const entry = registry.skills?.[slug];
+  if (entry && entry.remote_fingerprint === remoteFingerprint) {
+    return {
+      slug, folder: null,
+      fingerprint: entry.fingerprint || "",
+      remoteFingerprint,
+      meta: { name: entry.name || "", description: entry.description || "" },
+      author: fallback || owner,
+      repoUrl, fileCount: 0,
+      status: "synced", latestVersion: entry.version,
+      _cleanup: async () => {},
+    };
+  }
+
+  const tmpDir = await downloadGitHubSkill(parsed, token, tree);
+  const _cleanup = async () => {
+    try { await fs.rm(tmpDir, { recursive: true, force: true }); } catch {}
+  };
+
+  try {
+    const files = await listTextFiles(tmpDir);
+    const fingerprint = buildFingerprint(files);
+    const meta = await parseSkillMeta(tmpDir);
+    return {
+      slug, folder: tmpDir,
+      fingerprint, remoteFingerprint,
+      meta, author: fallback || owner, repoUrl,
+      fileCount: files.length,
+      status: entry ? "update" : "new",
+      latestVersion: entry?.version ?? null,
+      _cleanup,
+    };
+  } catch (err) {
+    await _cleanup();
+    throw err;
   }
 }
 

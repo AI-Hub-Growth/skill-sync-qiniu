@@ -1,0 +1,39 @@
+name: Sync Remote Skills
+
+on:
+  schedule:
+    - cron: '0 2 * * *'   # 每天 UTC 02:00
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: 'Version bump type'
+        default: 'patch'
+        type: choice
+        options: [patch, minor, major]
+      dry_run:
+        description: 'Dry run'
+        default: false
+        type: boolean
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Sync skills
+        env:
+          QINIU_ACCESS_KEY: ${{ secrets.QINIU_ACCESS_KEY }}
+          QINIU_SECRET_KEY: ${{ secrets.QINIU_SECRET_KEY }}
+          QINIU_BUCKET: ${{ secrets.QINIU_BUCKET }}
+          QINIU_DOWNLOAD_DOMAIN: ${{ secrets.QINIU_DOWNLOAD_DOMAIN }}
+          QINIU_AUTHOR: ${{ secrets.QINIU_AUTHOR }}
+          QINIU_PRIVATE: ${{ secrets.QINIU_PRIVATE }}
+          QINIU_AI_API_KEY: ${{ secrets.QINIU_AI_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ARGS="--sources sources.json --bump ${{ inputs.bump || 'patch' }}"
+          if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
+          node sync.mjs $ARGS

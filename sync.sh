@@ -4,6 +4,8 @@
 #   ./sync.sh --root /path/to/skills --changelog "Initial release"
 #   ./sync.sh --root /path/to/skills --bump minor --changelog "New features"
 #   ./sync.sh --root ./skills --root /other/skills --output /tmp/manifest.ndjson
+#   ./sync.sh --sources sources.json --dry-run
+#   ./sync.sh --sources sources.json --bump patch
 #
 # Requires .env in the same directory (copy from .env.template and fill in values).
 set -euo pipefail
