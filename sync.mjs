@@ -446,21 +446,34 @@ async function uploadFile(qiniu, key, filePath) {
   const token = buildUploadToken(qiniu, key);
   const fileBytes = await fs.readFile(filePath);
 
-  const form = new FormData();
-  form.set("token", token);
-  form.set("key", key);
-  form.set("file", new Blob([fileBytes]), path.basename(filePath));
+  let lastErr;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const form = new FormData();
+      form.set("token", token);
+      form.set("key", key);
+      form.set("file", new Blob([fileBytes]), path.basename(filePath));
 
-  const res = await fetch(qiniu.uploadUrl, {
-    method: "POST",
-    body: form,
-    signal: AbortSignal.timeout(120000),
-  });
+      const res = await fetch(qiniu.uploadUrl, {
+        method: "POST",
+        body: form,
+        signal: AbortSignal.timeout(300000),
+      });
 
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Upload failed for ${key}: HTTP ${res.status} ${text}`);
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`Upload failed for ${key}: HTTP ${res.status} ${text}`);
+      }
+      return;
+    } catch (err) {
+      lastErr = err;
+      if (attempt < 3) {
+        console.warn(`  Upload attempt ${attempt} failed for ${key}: ${err.message}, retrying...`);
+        await new Promise((r) => setTimeout(r, attempt * 2000));
+      }
+    }
   }
+  throw lastErr;
 }
 
 async function uploadRegistry(qiniu, registry) {
