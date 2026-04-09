@@ -1,5 +1,5 @@
 *.ndjson
-!skills-manifest.ndjson
+skills-manifest.ndjson
 .env
 .env.local
 node_modules/
