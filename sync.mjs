@@ -143,10 +143,11 @@ async function main() {
     console.log("\nRegistry updated.");
   }
 
-  const allCandidates = candidates;
-  const lines = allCandidates.map((c) => {
+  const manifestCandidates = actionable;
+  const lines = manifestCandidates.map((c) => {
     const entry = registry.skills?.[c.slug];
-    const version = entry?.version || c.latestVersion || "1.0.0";
+    const version = entry?.version ||
+      (c.status === "new" ? "1.0.0" : c.latestVersion ? bumpSemver(c.latestVersion, options.bump) : "1.0.0");
     const downloadUrl = `${downloadDomain}/${c.slug}/${c.slug}-${version}.zip`;
     const name = entry?.name_zh || entry?.name || c.meta?.name || titleCase(c.slug);
     const description = entry?.description_zh || entry?.description || c.meta?.description || "";
@@ -157,7 +158,7 @@ async function main() {
       description,
       stars: "0",
       downloads: "0",
-      versions: version,
+      latest_version: version,
       installs_current: 0,
       installs_all_time: 0,
       source_url: c.repoUrl || "",
@@ -166,7 +167,8 @@ async function main() {
     });
   });
 
-  await fs.writeFile(options.output, lines.join("\n") + "\n", "utf8");
+  const manifestContent = lines.length > 0 ? `${lines.join("\n")}\n` : "";
+  await fs.writeFile(options.output, manifestContent, "utf8");
   console.log(`\nManifest written: ${options.output} (${lines.length} skills)`);
 }
 
@@ -590,12 +592,113 @@ async function loadDotEnv(filePath) {
 
 function parseGitHubUrl(urlStr) {
   const cleaned = urlStr.trim().replace(/\/+$/, "");
-  const match = /^https:\/\/github\.com\/([^/]+)\/([^/]+)\/tree\/([^/]+)\/(.+)$/.exec(cleaned);
-  if (!match) {
-    throw new Error(`Invalid GitHub URL (expected https://github.com/{owner}/{repo}/tree/{branch}/{path}): ${urlStr}`);
+  const treeMatch = /^https:\/\/github\.com\/([^/]+)\/([^/]+)\/tree\/([^/]+)\/(.+)$/.exec(cleaned);
+  if (treeMatch) {
+    const [, owner, repo, ref, skillPath] = treeMatch;
+    return { owner, repo, ref, skillPath, isRepoRoot: false };
   }
-  const [, owner, repo, ref, skillPath] = match;
-  return { owner, repo, ref, skillPath };
+
+  const repoMatch = /^https:\/\/github\.com\/([^/]+)\/([^/]+)$/.exec(cleaned);
+  if (repoMatch) {
+    const [, owner, repo] = repoMatch;
+    return { owner, repo, ref: "", skillPath: "", isRepoRoot: true };
+  }
+
+  throw new Error(
+    `Invalid GitHub URL (expected https://github.com/{owner}/{repo} or https://github.com/{owner}/{repo}/tree/{branch}/{path}): ${urlStr}`
+  );
+}
+
+async function fetchGitHubRepo(owner, repo, token) {
+  const url = `https://api.github.com/repos/${owner}/${repo}`;
+  const headers = { Accept: "application/vnd.github.v3+json", "User-Agent": "skill-sync-qiniu" };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const res = await fetch(url, { headers, signal: AbortSignal.timeout(30000) });
+  if (!res.ok) throw new Error(`GitHub Repo API error HTTP ${res.status} for ${owner}/${repo}`);
+  return await res.json();
+}
+
+function enumerateSkillDirs(tree, rootPath = "") {
+  const normalizedRoot = rootPath.replace(/^\/+|\/+$/g, "");
+  const prefix = normalizedRoot ? `${normalizedRoot}/` : "";
+  const dirs = new Set();
+
+  for (const item of tree) {
+    if (item.type !== "blob") continue;
+    if (normalizedRoot && !item.path.startsWith(prefix)) continue;
+    const relPath = normalizedRoot ? item.path.slice(prefix.length) : item.path;
+    if (!relPath) continue;
+    if (!(relPath.endsWith("/SKILL.md") || relPath.endsWith("/skill.md") || relPath === "SKILL.md" || relPath === "skill.md")) {
+      continue;
+    }
+
+    const markerDir = path.posix.dirname(relPath);
+    const fullDir = markerDir === "." ? normalizedRoot : [normalizedRoot, markerDir].filter(Boolean).join("/");
+    dirs.add(fullDir);
+  }
+
+  return [...dirs].sort((a, b) => a.localeCompare(b));
+}
+
+function pruneNestedSkillDirs(skillDirs) {
+  const sorted = [...skillDirs].sort((a, b) => {
+    const depthDiff = a.split("/").length - b.split("/").length;
+    return depthDiff || a.localeCompare(b);
+  });
+
+  const selected = [];
+  for (const dir of sorted) {
+    const nestedUnderExisting = selected.some((parent) =>
+      parent === "" || dir === parent || dir.startsWith(`${parent}/`)
+    );
+    if (!nestedUnderExisting) selected.push(dir);
+  }
+  return selected;
+}
+
+function defaultSkillPathForRepo(tree, repo) {
+  const preferred = [
+    "skills",
+    repo,
+    `${repo}/skills`,
+  ];
+
+  for (const candidate of preferred) {
+    const hasMarker = tree.some((item) =>
+      item.type === "blob" && (
+        item.path === `${candidate}/SKILL.md` ||
+        item.path === `${candidate}/skill.md`
+      )
+    );
+    if (hasMarker) return candidate;
+
+    const hasChildren = tree.some((item) =>
+      item.type === "blob" &&
+      (item.path.startsWith(`${candidate}/`) || item.path === candidate)
+    );
+    if (hasChildren && enumerateSkillDirs(tree, candidate).length > 0) return candidate;
+  }
+
+  return "";
+}
+
+function buildRepoRootSlugs(skillDirs, repo, makeSlug) {
+  const counts = new Map();
+  for (const dir of skillDirs) {
+    const base = dir ? path.posix.basename(dir) : repo;
+    counts.set(base, (counts.get(base) || 0) + 1);
+  }
+
+  const slugMap = new Map();
+  for (const dir of skillDirs) {
+    const base = dir ? path.posix.basename(dir) : repo;
+    const name = (counts.get(base) || 0) > 1
+      ? (dir || repo).replace(/\//g, "-")
+      : base;
+    slugMap.set(dir, makeSlug(name));
+  }
+
+  return slugMap;
 }
 
 async function fetchGitHubTree(owner, repo, ref, token) {
@@ -642,23 +745,52 @@ async function loadSources(filePath) {
 
 async function resolveRemoteSource(source, registry, token, fallback) {
   const parsed = parseGitHubUrl(source.url);
+  const repoInfo = parsed.isRepoRoot
+    ? await fetchGitHubRepo(parsed.owner, parsed.repo, token)
+    : null;
+  const ref = parsed.ref || repoInfo?.default_branch;
+  if (!ref) throw new Error(`Unable to determine default branch for ${parsed.owner}/${parsed.repo}`);
+
   const repoUrl = `https://github.com/${parsed.owner}/${parsed.repo}`;
-  const tree = await fetchGitHubTree(parsed.owner, parsed.repo, parsed.ref, token);
-  const pathPrefix = parsed.skillPath + "/";
+  const tree = await fetchGitHubTree(parsed.owner, parsed.repo, ref, token);
+  const skillPath = parsed.skillPath || defaultSkillPathForRepo(tree, parsed.repo);
+  const pathPrefix = skillPath ? `${skillPath}/` : "";
 
   const pfx = source.prefix !== undefined ? source.prefix : sanitizeSlug(parsed.owner);
   const makeSlug = (name) =>
     sanitizeSlug(pfx ? `${pfx}-${name}` : name);
 
+  if (parsed.isRepoRoot) {
+    const skillDirs = pruneNestedSkillDirs(enumerateSkillDirs(tree, skillPath));
+    if (skillDirs.length === 0) {
+      throw new Error(`No SKILL.md found in repository ${parsed.owner}/${parsed.repo}`);
+    }
+
+    if (skillDirs.length === 1 && source.slug) {
+      return [await resolveOneRemoteSkill(
+        { ...parsed, ref, skillPath: skillDirs[0], slug: sanitizeSlug(source.slug) },
+        tree, repoUrl, registry, token, fallback
+      )];
+    }
+
+    const slugMap = buildRepoRootSlugs(skillDirs, parsed.repo, makeSlug);
+    return await mapWithConcurrency(skillDirs, 4, (dir) =>
+      resolveOneRemoteSkill(
+        { ...parsed, ref, skillPath: dir, slug: slugMap.get(dir) },
+        tree, repoUrl, registry, token, fallback
+      )
+    );
+  }
+
   const hasRootMarker = tree.some(
     (item) => item.type === "blob" &&
-      (item.path === `${parsed.skillPath}/SKILL.md` || item.path === `${parsed.skillPath}/skill.md`)
+      (item.path === `${skillPath}/SKILL.md` || item.path === `${skillPath}/skill.md`)
   );
 
   if (hasRootMarker) {
-    const baseName = parsed.skillPath.split("/").pop();
+    const baseName = skillPath.split("/").pop();
     const slug = source.slug ? sanitizeSlug(source.slug) : makeSlug(baseName);
-    return [await resolveOneRemoteSkill({ ...parsed, slug }, tree, repoUrl, registry, token, fallback)];
+    return [await resolveOneRemoteSkill({ ...parsed, ref, skillPath, slug }, tree, repoUrl, registry, token, fallback)];
   }
 
   // Collection mode: enumerate direct subdirs that have SKILL.md
@@ -672,7 +804,7 @@ async function resolveRemoteSource(source, registry, token, fallback) {
 
   const skills = [];
   for (const subdir of [...subdirs].sort()) {
-    const subdirPath = `${parsed.skillPath}/${subdir}`;
+    const subdirPath = `${skillPath}/${subdir}`;
     const hasMarker = tree.some(
       (item) => item.type === "blob" &&
         (item.path === `${subdirPath}/SKILL.md` || item.path === `${subdirPath}/skill.md`)
@@ -680,7 +812,7 @@ async function resolveRemoteSource(source, registry, token, fallback) {
     if (!hasMarker) continue;
     skills.push(
       await resolveOneRemoteSkill(
-        { ...parsed, skillPath: subdirPath, slug: makeSlug(subdir) },
+        { ...parsed, ref, skillPath: subdirPath, slug: makeSlug(subdir) },
         tree, repoUrl, registry, token, fallback
       )
     );
