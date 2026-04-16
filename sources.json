@@ -10,5 +10,29 @@
   {
     "url": "https://github.com/tibelf/code-report-toolkit",
     "prefix": ""
+  },
+  {
+    "url": "https://github.com/JuliusBrussee/caveman/tree/main/skills/caveman",
+    "prefix": "JuliusBrussee"
+  },
+  {
+    "url": "https://github.com/JuliusBrussee/caveman/tree/main/skills/caveman-commit",
+    "prefix": "JuliusBrussee"
+  },
+  {
+    "url": "https://github.com/JuliusBrussee/caveman/tree/main/skills/caveman-help",
+    "prefix": "JuliusBrussee"
+  },
+  {
+    "url": "https://github.com/JuliusBrussee/caveman/tree/main/skills/caveman-review",
+    "prefix": "JuliusBrussee"
+  },
+  {
+    "url": "https://github.com/JuliusBrussee/caveman/tree/main/caveman-compress",
+    "prefix": "JuliusBrussee"
+  },
+  {
+    "url": "https://github.com/Cocoon-AI/architecture-diagram-generator",
+    "prefix": ""
   }
 ]
